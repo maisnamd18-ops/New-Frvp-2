@@ -34,34 +34,44 @@ BREAKOUT_RR = 1.0
 # ============================================================
 @st.cache_data(ttl=900, show_spinner=False)
 def load_gold(interval, period):
-    df = yf.download(
-        "XAUUSD=X",
-        period=period,
-        interval=interval,
-        auto_adjust=False,
-        progress=False,
-        threads=False,
-    )
-    if df is None or df.empty:
-        return pd.DataFrame()
+    # Yahoo may return 404/no-data for XAUUSD=X. Try COMEX gold futures
+    # first, then fall back to the spot symbol. GC=F is not broker-specific
+    # spot XAUUSD; it is Yahoo's Gold Futures feed.
+    for symbol in ("GC=F", "XAUUSD=X"):
+        try:
+            df = yf.download(
+                symbol,
+                period=period,
+                interval=interval,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+            )
+            if df is None or df.empty:
+                continue
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
 
-    cols = ["Open", "High", "Low", "Close", "Volume"]
-    if not all(c in df.columns for c in cols):
-        return pd.DataFrame()
+            cols = ["Open", "High", "Low", "Close", "Volume"]
+            if not all(c in df.columns for c in cols):
+                continue
 
-    df = df[cols].copy().dropna(subset=["Open", "High", "Low", "Close"])
-    idx = pd.to_datetime(df.index)
-    if idx.tz is None:
-        idx = idx.tz_localize("UTC")
-    df.index = idx.tz_convert(NY)
+            df = df[cols].copy().dropna(subset=["Open", "High", "Low", "Close"])
+            if df.empty:
+                continue
 
-    # Calendar-day sessions. Each current day receives only the
-    # immediately preceding completed day's FRVP.
-    df["Session"] = df.index.date
-    return df.sort_index()
+            idx = pd.to_datetime(df.index)
+            if idx.tz is None:
+                idx = idx.tz_localize("UTC")
+            df.index = idx.tz_convert(NY)
+            df["Session"] = df.index.date
+            df.attrs["source_symbol"] = symbol
+            return df.sort_index()
+        except Exception:
+            continue
+
+    return pd.DataFrame()
 
 
 def frvp_profile(day_df, rows=60, value_area_pct=70.0):
@@ -585,7 +595,7 @@ def metrics(trades, start_balance):
 # ============================================================
 # UI
 # ============================================================
-st.title("FRVP Price Action Backtester V9")
+st.title("FRVP Price Action Backtester V10")
 st.caption(
     "Previous-day FRVP • Price action confirmation • "
     "VAL/VAH bounce = exactly 2R • POC logic unchanged"
@@ -595,21 +605,21 @@ with st.sidebar:
     st.header("FRVP")
     rows = st.number_input(
         "Row Size", min_value=20, max_value=200, value=ROWS, step=5,
-        key="v9_rows"
+        key="v10_rows"
     )
     va_pct = st.number_input(
         "Value Area %", min_value=50.0, max_value=90.0, value=VA_PCT, step=1.0,
-        key="v9_va"
+        key="v10_va"
     )
     st.caption("Every trading day uses only the immediately preceding completed day.")
 
     st.header("Market Data")
     timeframe = st.selectbox(
-        "Timeframe", ["5m", "15m"], index=0, key="v9_tf"
+        "Timeframe", ["5m", "15m"], index=0, key="v10_tf"
     )
     history = st.selectbox(
         "Historical data", ["5d", "10d", "20d", "30d", "60d"],
-        index=3, key="v9_history"
+        index=3, key="v10_history"
     )
 
     st.header("Strategy")
@@ -617,49 +627,49 @@ with st.sidebar:
         "Setup",
         ["All", "VAL Bounce", "VAH Bounce", "POC Bounce",
          "POC Reversal", "VAH Breakout", "VAL Breakout"],
-        index=0, key="v9_setup"
+        index=0, key="v10_setup"
     )
 
     st.header("Trade Rules")
     st.number_input(
         "Bounce Target (R)",
         min_value=2.0, max_value=2.0, value=2.0, step=0.5,
-        disabled=True, key="v9_bounce_rr"
+        disabled=True, key="v10_bounce_rr"
     )
     sl_buffer = st.number_input(
         "SL Buffer ($)", min_value=0.0, max_value=5.0,
-        value=SL_BUFFER, step=0.05, key="v9_sl"
+        value=SL_BUFFER, step=0.05, key="v10_sl"
     )
     max_bars = st.number_input(
         "Maximum bars in trade", min_value=5, max_value=300,
-        value=MAX_BARS, step=5, key="v9_maxbars"
+        value=MAX_BARS, step=5, key="v10_maxbars"
     )
 
     st.header("Balance & Risk")
     start_balance = st.number_input(
         "Starting Balance ($)", min_value=100.0,
         max_value=1000000.0, value=START_BALANCE, step=100.0,
-        key="v9_balance"
+        key="v10_balance"
     )
     risk_pct = st.number_input(
         "Risk per trade (%)", min_value=0.1, max_value=5.0,
-        value=RISK_PCT, step=0.1, key="v9_risk"
+        value=RISK_PCT, step=0.1, key="v10_risk"
     )
 
     run = st.button(
         "🔄 Fetch Gold & Run Backtest",
         type="primary",
         use_container_width=True,
-        key="v9_run"
+        key="v10_run"
     )
 
 if run:
-    st.session_state["v9_run_once"] = True
+    st.session_state["v10_run_once"] = True
 
-if not st.session_state.get("v9_run_once"):
+if not st.session_state.get("v10_run_once"):
     st.info(
         "Press “Fetch Gold & Run Backtest”. No CSV upload is required. "
-        "The app automatically downloads XAUUSD data and creates a separate "
+        "The app automatically downloads Gold data and creates a separate "
         "previous-day FRVP for every current day."
     )
     st.stop()
@@ -669,10 +679,18 @@ with st.spinner("Fetching Gold data and running V9 backtest..."):
 
 if df.empty:
     st.error(
-        "Gold data could not be loaded from Yahoo Finance. "
-        "Try 5m with 5d/10d or 15m with a longer period."
+        "Automatic Gold data could not be loaded. Try 5m with 5d/10d or "
+        "15m with a longer period, and check the Streamlit logs if Yahoo is unavailable."
     )
     st.stop()
+
+source_symbol = df.attrs.get("source_symbol", "GC=F")
+if source_symbol == "GC=F":
+    st.info(
+        "Automatic source: GC=F (COMEX Gold Futures). Yahoo's XAUUSD=X feed "
+        "was unavailable, so the app used GC=F automatically. This is futures "
+        "data, not broker-specific spot XAUUSD."
+    )
 
 levels = build_previous_day_levels(df, int(rows), float(va_pct))
 
